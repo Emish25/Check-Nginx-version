@@ -1,5 +1,5 @@
 ---
-- name: Nginx_version
+- name: Nginx_check
   hosts: all
   become: yes
   become_method: sudo
@@ -36,9 +36,15 @@
       failed_when: false
 
     - name: "NATIVE | Extraire le numéro de version"
+      shell: nginx -v 2>&1 | grep -oP '(?<=nginx/)[0-9.]+' || echo "N/A"
+      register: nginx_version_clean
+      changed_when: false
+      failed_when: false
+      when: nginx_binary_path.stdout != "not-found"
+
+    - name: "NATIVE | Stocker la version extraite"
       set_fact:
-        nginx_native_version: >-
-          {{ nginx_version_raw.stdout | default('N/A') | regex_search('nginx/([\d.]+)') | default('N/A') }}
+        nginx_native_version: "{{ nginx_version_clean.stdout | trim | default('N/A') }}"
       when: nginx_binary_path.stdout != "not-found"
 
     - name: "NATIVE | Version N/A si nginx absent"
