@@ -1,0 +1,36 @@
+---
+- name: Nginx version
+  hosts: all
+  become: yes
+  become_method: sudo
+  become_flags: '-H'
+  vars:
+    username:
+    ansible_remote_tmp: /tmp/.ansible
+  environment:
+    ANSIBLE_REMOTE_TMP: /tmp/.ansible
+
+  tasks:
+
+    - name: Vérifier si NGINX est installé
+      ansible.builtin.command: which nginx
+      register: nginx_installed
+      changed_when: false
+      failed_when: false
+
+    - name: Récupérer la version de NGINX
+      ansible.builtin.command: nginx -v
+      register: nginx_version
+      changed_when: false
+      failed_when: false
+      when: nginx_installed.rc == 0
+
+    - name: Afficher le résultat
+      ansible.builtin.debug:
+        msg: "NGINX {{ nginx_version.stderr }} est installé sur {{ inventory_hostname }}"
+      when: nginx_installed.rc == 0
+
+    - name: NGINX non installé
+      ansible.builtin.debug:
+        msg: "NGINX n'est pas installé sur {{ inventory_hostname }}"
+      when: nginx_installed.rc != 0
