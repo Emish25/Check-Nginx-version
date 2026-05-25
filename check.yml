@@ -1,0 +1,124 @@
+---
+- name: Nginx_version
+  hosts: all
+  become: yes
+  become_method: sudo
+  become_flags: '-H'
+  vars:
+    username:
+    ansible_remote_tmp: /tmp/.ansible
+  environment:
+    ANSIBLE_REMOTE_TMP: /tmp/.ansible
+
+  tasks:
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 1. DÉTECTION NATIVE
+    # ══════════════════════════════════════════════════════════════════════
+
+    - name: "NATIVE | Chercher le binaire nginx"
+      shell: command -v nginx 2>/dev/null || echo "not-found"
+      register: nginx_binary_path
+      changed_when: false
+      failed_when: false
+
+    - name: "NATIVE | Récupérer la version si binaire présent"
+      shell: nginx -v 2>&1 || echo "N/A"
+      register: nginx_version_raw
+      changed_when: false
+      failed_when: false
+      when: nginx_binary_path.stdout != "not-found"
+
+    - name: "NATIVE | Vérifier l'état du service systemd nginx"
+      shell: systemctl is-active nginx 2>/dev/null || echo "inactive"
+      register: nginx_service_status
+      changed_when: false
+      failed_when: false
+
+    - name: "NATIVE | Consolider les résultats"
+      set_fact:
+        nginx_native_installed: "{{ nginx_binary_path.stdout != 'not-found' }}"
+        nginx_native_running: "{{ nginx_service_status.stdout == 'active' }}"
+        nginx_native_version: >-
+          {{
+            nginx_version_raw.stdout | default('N/A')
+            | regex_search('nginx/([\\d.]+)', '\\1')
+            | first | default('N/A')
+          }}
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 2. DÉTECTION DOCKER
+    # ══════════════════════════════════════════════════════════════════════
+
+    - name: "DOCKER | Vérifier si Docker est installé"
+      shell: command -v docker 2>/dev/null && docker info --format '{{.ServerVersion}}' 2>/dev/null || echo "docker-absent"
+      register: docker_check
+      changed_when: false
+      failed_when: false
+
+    - name: "DOCKER | Lister tous les conteneurs nginx (y compris arrêtés)"
+      shell: |
+        docker ps -a --format '{"id":"{{.ID}}","name":"{{.Names}}","image":"{{.Image}}","status":"{{.Status}}"}' \
+        2>/dev/null | grep -i nginx || echo "[]"
+      register: docker_all_containers
+      changed_when: false
+      failed_when: false
+      when:
+        - docker_check.stdout != "docker-absent"
+        - docker_check.rc == 0
+
+    - name: "DOCKER | Lister les conteneurs nginx actifs"
+      shell: |
+        docker ps --format '{"id":"{{.ID}}","name":"{{.Names}}","image":"{{.Image}}","status":"{{.Status}}"}' \
+        2>/dev/null | grep -i nginx || echo "[]"
+      register: docker_running_containers
+      changed_when: false
+      failed_when: false
+      when:
+        - docker_check.stdout != "docker-absent"
+        - docker_check.rc == 0
+
+    - name: "DOCKER | Consolider les résultats Docker"
+      set_fact:
+        nginx_docker_present: "{{ docker_check.stdout != 'docker-absent' }}"
+        nginx_docker_found: "{{ (docker_all_containers.stdout | default('[]')) != '[]' }}"
+        nginx_docker_running_count: >-
+          {{ docker_running_containers.stdout_lines | default([]) | reject('equalto', '[]') | list | length }}
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 3. STATUT GLOBAL + CVE
+    # ══════════════════════════════════════════════════════════════════════
+
+    - name: "STATUS | Calculer le statut global"
+      set_fact:
+        nginx_overall_status: >-
+          {% if nginx_native_running or (nginx_docker_running_count | default(0) | int > 0) %}RUNNING
+          {% elif nginx_native_installed or nginx_docker_found | default(false) %}INSTALLED_STOPPED
+          {% else %}ABSENT{% endif %}
+        nginx_vulnerable: >-
+          {{
+            nginx_native_version != 'N/A' and
+            nginx_native_version is version('1.30.1', '<')
+          }}
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 4. AFFICHAGE CONSOLE
+    # ══════════════════════════════════════════════════════════════════════
+
+    - name: "REPORT | Résumé pour {{ inventory_hostname }}"
+      debug:
+        msg: |
+          ┌─────────────────────────────────────────────────────┐
+          │  HOST     : {{ inventory_hostname | upper }}
+          │  OS       : {{ ansible_distribution }} {{ ansible_distribution_version }}
+          │  STATUT   : {{ nginx_overall_status | trim }}
+          ├─────────────── NGINX NATIF ─────────────────────────┤
+          │  Installé : {{ nginx_native_installed }}
+          │  Version  : {{ nginx_native_version }}
+          │  Service  : {{ nginx_service_status.stdout | default('unknown') }}
+          │  CVE-2026-42945 : {{ '⚠️  VULNÉRABLE' if nginx_vulnerable | bool else '✅ OK' }}
+          ├─────────────── NGINX DOCKER ────────────────────────┤
+          │  Docker présent          : {{ nginx_docker_present | default(false) }}
+          │  Conteneurs nginx (all)  : {{ docker_all_containers.stdout_lines | default([]) | reject('equalto', '[]') | list | length }}
+          │  Conteneurs nginx (run)  : {{ nginx_docker_running_count | default(0) }}
+          └─────────────────────────────────────────────────────┘
